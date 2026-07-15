@@ -1,0 +1,84 @@
+# Market-Intel Configuration
+# Edit this file to control which collectors run, what they collect, and how data is stored.
+
+# ─── General ────────────────────────────────────────────────────────────────
+general:
+  environment: production          # production | development
+  timezone: UTC
+  max_items_per_collector: 50     # cap per collector per run
+
+# ─── Collectors ─────────────────────────────────────────────────────────────
+collectors:
+  reddit:
+    enabled: true
+    subreddits:
+      - marketing
+      - digital_marketing
+      - SEO
+      - PPC
+      - analytics
+      - socialmedia
+    sort: hot                      # hot | new | top | rising
+    time_range: day               # hour | day | week | month | all
+    min_score: 10                 # minimum upvotes to be included
+
+  rss:
+    enabled: true
+    feeds:
+      - url: https://feeds.feedburner.com/marketingland
+        name: Marketing Land
+      - url: https://www.searchenginejournal.com/feed/
+        name: Search Engine Journal
+      - url: https://neilpatel.com/feed/
+        name: Neil Patel
+      - url: https://www.hubspot.com/blog/rss.xml
+        name: HubSpot Blog
+      - url: https://contentmarketinginstitute.com/feed/
+        name: Content Marketing Institute
+
+  google_news:
+    enabled: true
+    queries:
+      - "digital marketing trends"
+      - "SEO algorithm update"
+      - "social media marketing"
+      - "marketing automation"
+      - "content marketing strategy"
+    language: en
+    country: US
+
+# ─── Processors ─────────────────────────────────────────────────────────────
+processors:
+  dedup:
+    enabled: true
+    keys: [url, title]            # deduplicate on these fields
+  enrich:
+    enabled: true
+    add_sentiment: true           # basic positive/negative/neutral
+    add_keywords: true            # extract top keywords from title
+    add_read_time: true           # estimate reading time
+
+# ─── Storage ────────────────────────────────────────────────────────────────
+storage:
+  type: json                      # json | (future: sqlite, postgres)
+  path: data/
+  versioning: true                # store dated snapshots
+  retention_days: 90              # delete raw data older than this
+
+# ─── Reports ────────────────────────────────────────────────────────────────
+reports:
+  markdown:
+    enabled: true
+    output_path: reports/
+    include_summary: true
+    include_top_stories: true
+    include_by_source: true
+    include_by_topic: true
+    top_stories_count: 10
+
+# ─── Retry Logic ────────────────────────────────────────────────────────────
+retry:
+  max_attempts: 3
+  initial_backoff: 1.0            # seconds
+  max_backoff: 10.0               # seconds
+  retryable_status_codes: [429, 500, 502, 503, 504]
