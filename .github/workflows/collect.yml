@@ -30,11 +30,13 @@ jobs:
         run: |
           git config user.name "Market-Intel Bot"
           git config user.email "actions@github.com"
-          git add data/ reports/ 2>/dev/null || true
+          git add data/ reports/ actions/ 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "No new data to commit"
           else
-            git commit -m "Market-Intel: automated collection $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Market-Intel: closed-loop run $(date -u '+%Y-%m-%d %H:%M UTC')
+
+  Phase 4: Score → Decide → Act → Measure → Learn"
             git push
           fi
         env:

@@ -1,17 +1,24 @@
 """
 Main workflow orchestrator — ties collectors, processors, storage, and reports together.
 
-Phase 2: Intelligence pipeline
+Phase 3 closed-loop pipeline:
   Collect → Dedup → Enrich → Entity Extraction → Competitor Detection →
   Pain-Point Extraction → Buying-Signal Detection → Topic Clustering →
-  Trend Detection → Store → Generate Intelligence Report
+  Trend Detection → Entity Graph → Scoring → Store → Generate Reports
+
+Phase 4 closes the loop:
+  ... → Scoring → Decision Engine → Execution Engine →
+       Analytics Engine → Learning Engine → Generate Decision Report
+
+Decision → Execution → Analytics → Learning → (adjust weights) → next run
 """
 from __future__ import annotations
 
 import json
 import uuid
 from datetime import datetime, timezone
-from collections import Counter
+from pathlib import Path
+
 from core.config_loader import Config
 from core.container import Container
 from core.logger import get_logger, setup_logging
@@ -88,6 +95,10 @@ class DailyRun:
         from processors.trend_detection import TrendDetectionProcessor
         from processors.entity_graph import EntityGraphProcessor
         from processors.scoring import ScoringProcessor
+        from processors.decision_engine import DecisionEngine
+        from processors.execution_engine import ExecutionEngine
+        from processors.analytics_engine import AnalyticsEngine
+        from processors.learning_engine import LearningEngine
 
         # 1. Dedup (similarity-based)
         dedup_cfg = processors_config.get("similarity_dedup", processors_config.get("dedup", {}))
@@ -128,7 +139,6 @@ class DailyRun:
         trend_cfg = processors_config.get("trend_detection", {})
         if trend_cfg.get("enabled", True):
             trend_processor = TrendDetectionProcessor(trend_cfg)
-            # Load historical keyword counts for comparison
             historical_counts = self._load_historical_keywords()
             trend_processor.set_history(historical_counts)
             self._container.register_processor("trend_detection", trend_processor)
@@ -141,14 +151,194 @@ class DailyRun:
         # 10. Scoring engine
         scoring_cfg = processors_config.get("scoring", {})
         if scoring_cfg.get("enabled", True):
-            self._container.register_processor("scoring", ScoringProcessor(scoring_cfg))
+            # Learning engine may have adjusted weights — load them
+            learning_weights = self._load_learning_weights()
+            merged_scoring_cfg = {**scoring_cfg, **{"weights": learning_weights}}
+            self._container.register_processor("scoring", ScoringProcessor(merged_scoring_cfg))
+
+        # 11. Decision engine (Phase 4)
+        decision_cfg = processors_config.get("decision_engine", {})
+        if decision_cfg.get("enabled", True):
+            self._container.register_processor("decision_engine", DecisionEngine(decision_cfg))
+
+        # 12. Execution engine (Phase 4)
+        execution_cfg = processors_config.get("execution_engine", {})
+        if execution_cfg.get("enabled", True):
+            self._container.register_processor("execution_engine", ExecutionEngine(execution_cfg))
+
+        # 13. Analytics engine (Phase 4) — records executed actions in SQLite
+        analytics_cfg = processors_config.get("analytics_engine", {})
+        if analytics_cfg.get("enabled", True):
+            storage_cfg = self._config.storage
+            self._container.register_processor(
+                "analytics_engine",
+                AnalyticsEngine({**analytics_cfg, **{"storage": storage_cfg}})
+            )
+
+        # 14. Learning engine (Phase 4) — adjusts weights for next run
+        learning_cfg = processors_config.get("learning_engine", {})
+        if learning_cfg.get("enabled", True):
+            storage_cfg = self._config.storage
+            self._container.register_processor(
+                "learning_engine",
+                LearningEngine({**learning_cfg, **{"storage": storage_cfg}})
+            )
 
         # ─── Storage ───────────────────────────────────────────────────
-"""
-Main workflow orchestrator — ties collectors, processors, storage, and reports together.
+        storage_cfg = self._config.storage
+        storage_type = storage_cfg.get("type", "json")
+        if storage_type == "sqlite":
+            from storage.sqlite_store import SQLiteStorage
+            self._container.set_storage(SQLiteStorage(storage_cfg))
+        else:
+            from storage.json_store import JSONStorage
+            self._container.set_storage(JSONStorage(storage_cfg))
 
-Phase 2: Intelligence pipeline
-  Collect → Dedup → Enrich → Entity Extraction → Competitor Detection →
-  Pain-Point Extraction → Buying-Signal Detection → Topic Clustering →
-  Trend Detection → Store → Generate Intelligence Report
-"""
+        # ─── Reports ───────────────────────────────────────────────────
+        reports_cfg = self._config.reports
+        intel_cfg = reports_cfg.get("intelligence", {})
+        if intel_cfg.get("enabled", True):
+            from reports.intelligence_report import IntelligenceReportGenerator
+            self._container.set_report_generator(IntelligenceReportGenerator(intel_cfg))
+
+    def _load_historical_keywords(self) -> dict[str, int]:
+        """Load keyword history from SQLite for trend comparison."""
+        try:
+            storage_cfg = self._config.storage
+            if storage_cfg.get("type") != "sqlite":
+                return {}
+            from storage.sqlite_store import SQLiteStorage
+            storage = SQLiteStorage(storage_cfg)
+            return storage.load_keyword_history(days=30)
+        except Exception as e:
+            self._logger.warning(f"Could not load historical keywords: {e}")
+            return {}
+
+    def _load_learning_weights(self) -> dict:
+        """Load learning-adjusted weights from data/learning_weights.json."""
+        try:
+            weights_path = Path(self._config.storage.get("path", "data/market_intel.db")).parent / "learning_weights.json"
+            if weights_path.exists():
+                with open(weights_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            self._logger.warning(f"Could not load learning weights: {e}")
+        return {}
+
+    def run(self) -> dict:
+        """Execute the full pipeline. Returns a summary dict for logging."""
+        self._logger.info(f"Starting run {self._run_id}")
+
+        # 1. Collect
+        collectors = self._container.get_collectors()
+        raw_items: list[RawItem] = []
+        collector_stats: dict[str, int] = {}
+        for name, collector in collectors.items():
+            try:
+                items = collector.collect()
+                raw_items.extend(items)
+                collector_stats[name] = len(items)
+                self._logger.info(f"Collector '{name}': {len(items)} items")
+            except Exception as e:
+                self._logger.error(f"Collector '{name}' failed: {e}", exc_info=True)
+                collector_stats[name] = 0
+
+        if not raw_items:
+            self._logger.warning("No items collected — aborting run")
+            return {
+                "run_id": self._run_id,
+                "status": "no_data",
+                "collectors": collector_stats,
+            }
+
+        # 2. Convert raw → processed
+        processed_items = [ProcessedItem.from_raw(raw) for raw in raw_items]
+        self._logger.info(f"Total items to process: {len(processed_items)}")
+
+        # 3. Run processors in order
+        processors = self._container.get_processors()
+        for name, processor in processors.items():
+            try:
+                processed_items = processor.process(processed_items)
+                self._logger.info(f"Processor '{name}': {len(processed_items)} items after")
+            except Exception as e:
+                self._logger.error(f"Processor '{name}' failed: {e}", exc_info=True)
+
+        # 4. Storage
+        try:
+            storage = self._container.get_storage()
+            storage.save([self._processed_to_dict(item) for item in processed_items], self._run_id)
+        except Exception as e:
+            self._logger.error(f"Storage failed: {e}", exc_info=True)
+
+        # 5. Reports
+        try:
+            report_gen = self._container.get_report_generator()
+            report_path = report_gen.generate(processed_items, self._run_id)
+            self._logger.info(f"Report generated: {report_path}")
+        except Exception as e:
+            self._logger.error(f"Report generation failed: {e}", exc_info=True)
+            report_path = None
+
+        # 6. Decision report (Phase 4)
+        decision_report_path = None
+        try:
+            from reports.decision_report import DecisionReportGenerator
+            dec_cfg = self._config.reports.get("decisions", {"enabled": True, "output_path": "reports/"})
+            if dec_cfg.get("enabled", True):
+                dec_gen = DecisionReportGenerator(dec_cfg)
+                decision_report_path = dec_gen.generate(processed_items, self._run_id)
+                self._logger.info(f"Decision report generated: {decision_report_path}")
+        except Exception as e:
+            self._logger.error(f"Decision report failed: {e}", exc_info=True)
+
+        # 7. Build summary
+        scores = processed_items[0].metadata.get("_scores", {}) if processed_items else {}
+        decisions = processed_items[0].metadata.get("_decisions", {}) if processed_items else {}
+        executions = processed_items[0].metadata.get("_executions", {}) if processed_items else {}
+        learning = processed_items[0].metadata.get("_learning", {}) if processed_items else {}
+
+        summary = {
+            "run_id": self._run_id,
+            "status": "ok",
+            "total_items": len(processed_items),
+            "collectors": collector_stats,
+            "companies_scored": len(scores.get("company_scores", [])),
+            "topics_scored": len(scores.get("topic_scores", [])),
+            "insights": len(scores.get("insights", [])),
+            "decisions": len(decisions.get("decisions", [])) if isinstance(decisions, dict) else 0,
+            "actions_executed": len(executions.get("artifacts", [])) if isinstance(executions, dict) else 0,
+            "learning_adjustments": len(learning.get("weight_adjustments", [])) if isinstance(learning, dict) else 0,
+            "report_path": report_path,
+            "decision_report_path": decision_report_path,
+        }
+
+        self._logger.info(f"Run complete: {summary}")
+        return summary
+
+    @staticmethod
+    def _processed_to_dict(item: ProcessedItem) -> dict:
+        """Convert ProcessedItem to a dict for storage."""
+        return {
+            "id": item.id,
+            "source": item.source,
+            "source_name": item.source_name,
+            "title": item.title,
+            "url": item.url,
+            "body": item.body,
+            "author": item.author,
+            "published_at": item.published_at,
+            "collected_at": item.collected_at,
+            "score": item.score,
+            "tags": item.tags,
+            "metadata": item.metadata,
+            "sentiment": item.metadata.get("sentiment", "neutral"),
+            "keywords": item.metadata.get("keywords", []),
+            "read_time_minutes": item.metadata.get("read_time_minutes", 0),
+            "dedup_key": item.metadata.get("dedup_key", ""),
+            "cluster_id": item.metadata.get("cluster_id"),
+            "cluster_label": item.metadata.get("cluster_label"),
+            "trend": item.metadata.get("trend", "stable"),
+            "buying_intent": item.metadata.get("buying_intent", 0.0),
+            "processed_at": item.processed_at,
+        }

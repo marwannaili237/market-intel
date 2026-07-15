@@ -1,5 +1,13 @@
 # Market-Intel Configuration
 # Edit this file to control which collectors run, what they collect, and how data is stored.
+#
+# Phase 1: Reddit + RSS + Google News → JSON storage → markdown report
+# Phase 2: + similarity dedup, entity extraction, competitor / pain-point /
+#           buying-signal detection, topic clustering, trend detection, intelligence report
+# Phase 3: + Hacker News / GitHub Issues / Product Hunt / G2 / Job boards collectors
+#           + SQLite historical storage + entity graph + scoring engine
+# Phase 4: + Decision engine → Execution engine → Analytics engine → Learning engine
+#           (closes the loop: Score → Decide → Act → Measure → Learn)
 
 # ─── General ────────────────────────────────────────────────────────────────
 general:
@@ -47,57 +55,6 @@ collectors:
     language: en
     country: US
 
-# ─── Processors ─────────────────────────────────────────────────────────────
-processors:
-  similarity_dedup:
-    enabled: true
-    title_threshold: 0.6
-    url_normalize: true
-  enrich:
-    enabled: true
-    add_sentiment: true
-    add_keywords: true
-    add_read_time: true
-  entity_extraction:
-    enabled: true
-  competitor_detection:
-    enabled: true
-  pain_point_extraction:
-    enabled: true
-  buying_signal_detection:
-    enabled: true
-  topic_clustering:
-    enabled: true
-    similarity_threshold: 0.2
-    min_cluster_size: 2
-    max_clusters: 15
-  trend_detection:
-    enabled: true
-    spike_threshold: 2.0
-    hot_threshold: 3.0
-
-# ─── Storage ────────────────────────────────────────────────────────────────
-storage:
-  type: sqlite                      # json | (future: sqlite, postgres)
-  path: data/market_intel.db
-  versioning: true                # store dated snapshots
-  retention_days: 90              # delete raw data older than this
-
-# ─── Reports ────────────────────────────────────────────────────────────────
-reports:
-  intelligence:
-    enabled: true
-    output_path: reports/
-    top_stories_count: 10
-
-# ─── Retry Logic ────────────────────────────────────────────────────────────
-retry:
-  max_attempts: 3
-  initial_backoff: 1.0            # seconds
-  max_backoff: 10.0               # seconds
-  retryable_status_codes: [429, 500, 502, 503, 504]
-
-# ─── Additional Collectors (within collectors section) ────────────────────
   hacker_news:
     enabled: true
     queries:
@@ -140,7 +97,83 @@ retry:
       - marketing automation
     sources: ["remoteok", "workinstartups"]
 
+# ─── Processors ─────────────────────────────────────────────────────────────
+processors:
+  similarity_dedup:
+    enabled: true
+    title_threshold: 0.6
+    url_normalize: true
+  enrich:
+    enabled: true
+    add_sentiment: true
+    add_keywords: true
+    add_read_time: true
+  entity_extraction:
+    enabled: true
+  competitor_detection:
+    enabled: true
+  pain_point_extraction:
+    enabled: true
+  buying_signal_detection:
+    enabled: true
+  topic_clustering:
+    enabled: true
+    similarity_threshold: 0.2
+    min_cluster_size: 2
+    max_clusters: 15
+  trend_detection:
+    enabled: true
+    spike_threshold: 2.0
+    hot_threshold: 3.0
   entity_graph:
     enabled: true
   scoring:
     enabled: true
+
+  # ─── Phase 4: closed-loop modules ──────────────────────────────────────
+  decision_engine:
+    enabled: true
+    opportunity_high: 60
+    opportunity_medium: 35
+    threat_high: 60
+    threat_medium: 35
+    weakness_high: 50
+    trend_hot: 60
+    trend_rising: 35
+    min_evidence: 2
+
+  execution_engine:
+    enabled: true
+    output_path: actions
+    max_artifacts_per_run: 20
+
+  analytics_engine:
+    enabled: true
+
+  learning_engine:
+    enabled: true
+
+# ─── Storage ────────────────────────────────────────────────────────────────
+storage:
+  type: sqlite                      # json | sqlite
+  path: data/market_intel.db
+  versioning: true                # store dated snapshots
+  retention_days: 90              # delete raw data older than this
+
+# ─── Reports ────────────────────────────────────────────────────────────────
+reports:
+  intelligence:
+    enabled: true
+    output_path: reports/
+    top_stories_count: 10
+  decisions:
+    enabled: true
+    output_path: reports/
+    top_decisions_count: 15
+
+# ─── Retry Logic ────────────────────────────────────────────────────────────
+retry:
+  max_attempts: 3
+  initial_backoff: 1.0            # seconds
+  max_backoff: 10.0               # seconds
+  retryable_status_codes: [429, 500, 502, 503, 504]
